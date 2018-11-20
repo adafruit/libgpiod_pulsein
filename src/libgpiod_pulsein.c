@@ -1,85 +1,99 @@
 #include <gpiod.h>
 #include "libgpiod_pulsein.h"
 
+#include <getopt.h>
+#include <limits.h>
 #include <stdio.h>
 #include <string.h>
-#include <poll.h>
+#include <sys/time.h>
 
-struct mon_ctx {
-	unsigned int offset;
-	unsigned int events_wanted;
-	unsigned int events_done;
-
-	bool silent;
-	char *fmt;
-
-	int sigfd;
+static const struct option longopts[] = {
+	{ "help",	no_argument,	NULL,	'h' },
+	{ "version",	no_argument,	NULL,	'v' },
+	{ "active-low",	no_argument,	NULL,	'l' },
 };
 
+static const char *const shortopts = "+hvl";
 
-static void output_event(unsigned int offset,
-				       const struct timespec *ts,
-				       int event_type)
+static void print_help(void)
 {
-	char *evname;
-
-	if (event_type == GPIOD_CTXLESS_EVENT_CB_RISING_EDGE)
-		evname = " RISING EDGE";
-	else
-		evname = "FALLING EDGE";
-
-	printf("event: %s offset: %u timestamp: [%8ld.%09ld]\n",
-	       evname, offset, ts->tv_sec, ts->tv_nsec);
-}
-
-static int callback(int event_type, unsigned int line_offset,
-		    const struct timespec *timestamp, void *data)
-{
-	struct mon_ctx *ctx = data;
-
-	switch (event_type) {
-	case GPIOD_CTXLESS_EVENT_CB_RISING_EDGE:
-	case GPIOD_CTXLESS_EVENT_CB_FALLING_EDGE:
-		if (!ctx->silent) {
-			output_event(line_offset, timestamp, event_type);
-		}
-		break;
-	}
-
-
-	if (ctx->events_wanted && ctx->events_done >= ctx->events_wanted)
-		return GPIOD_CTXLESS_EVENT_CB_RET_STOP;
-
-	return GPIOD_CTXLESS_EVENT_CB_RET_OK;
+	printf("Usage: libgpiod_pulsein [OPTIONS] <chip name/number> <offset>\n");
+	printf("Continuously poll line value from a GPIO chip\n");
+	printf("\n");
+	printf("Options:\n");
+	printf("  -h, --help:\t\tdisplay this message and exit\n");
+	printf("  -v, --version:\tdisplay the version and exit\n");
+	printf("  -l, --active-low:\tset the line active state to low\n");
 }
 
 int main(int argc, char **argv) {
-	unsigned int offsets[GPIOD_LINE_BULK_MAX_LINES], num_lines = 0, offset;
+	int offset, optc, opti, value, previous_value;
 	bool active_low = false;
-	struct timespec timeout = { 10, 0 };
-	int ret, event_type;
-	struct mon_ctx ctx;
+	char *device, *end;
+	struct timeval tv1, tv2;
 
-	printf("check on the mic\n");
+	for (;;) {
+		optc = getopt_long(argc, argv, shortopts, longopts, &opti);
+		if (optc < 0)
+			break;
 
-	memset(&ctx, 0, sizeof(ctx));
+		switch (optc) {
+		case 'h':
+			print_help();
+			return EXIT_SUCCESS;
+		case 'v':
+			printf("libgpiod_pulsein v0.0.1");
+			return EXIT_SUCCESS;
+		case 'l':
+			active_low = true;
+			break;
+		default:
+			abort();
+		}
+	}
 
-	event_type = GPIOD_CTXLESS_EVENT_BOTH_EDGES;
+	argc -= optind;
+	argv += optind;
 
-        // XXX
-        offset = 5;
-	num_lines = 1;
-        offsets[0] = offset;
+	if (argc < 1) {
+		printf("gpiochip must be specified");
+		exit(1);
+	}
 
-	// ret = gpiod_ctxless_event_monitor_multiple(argv[0], event_type,
-	ret = gpiod_ctxless_event_monitor_multiple("gpiochip0", event_type,
-						   offsets, num_lines,
-						   active_low, "gpiomon",
-						   &timeout, NULL,
-						   callback, &ctx);
-	if (ret)
-		printf("error waiting for events");
+	if (argc < 2) {
+		printf("a single GPIO line offset must be specified");
+		exit(1);
+	}
 
-	return(0);
+	device = argv[0];
+	offset = strtoul(argv[1], &end, 10);
+	if (*end != '\0' || offset > INT_MAX) {
+	        printf("invalid GPIO offset: %s", argv[1]);
+		exit(1);
+	}
+
+	// Print initial value:
+	previous_value = gpiod_ctxless_get_value(device, offset, active_low, "libgpiod_pulsein");
+	printf("%d\t0\n", previous_value);
+	gettimeofday(&tv1, NULL);
+
+	for (;;) {
+		value = gpiod_ctxless_get_value(device, offset, active_low, "libgpiod_pulsein");
+		if (value < 0) {
+	        	printf("error reading GPIO values");
+			exit(1);
+		}
+		if (value != previous_value) {
+	                gettimeofday(&tv2, NULL);
+			printf(
+				"%d\t%0.f\n",
+				value,
+                                ((double) (tv2.tv_usec - tv1.tv_usec) + (double) (tv2.tv_sec - tv1.tv_sec) * 1000000)
+			);
+			gettimeofday(&tv1, NULL);
+		}
+		previous_value = value;
+	}
+
+	return EXIT_SUCCESS;
 }
-
