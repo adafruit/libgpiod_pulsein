@@ -11,6 +11,8 @@ static const struct option longopts[] = {
 	{ "help",	no_argument,	NULL,	'h' },
 	{ "version",	no_argument,	NULL,	'v' },
 	{ "active-low",	no_argument,	NULL,	'l' },
+
+	{ "pulses",	required_argument,	NULL,	'p' },
 };
 
 static const char *const shortopts = "+hvl";
@@ -24,11 +26,13 @@ static void print_help(void)
 	printf("  -h, --help:\t\tdisplay this message and exit\n");
 	printf("  -v, --version:\tdisplay the version and exit\n");
 	printf("  -l, --active-low:\tset the line active state to low\n");
+	printf("  -p, --pulses:\tnumber of state changes to record before exit\n");
 }
 
 int main(int argc, char **argv) {
-	int offset, optc, opti, value, previous_value;
-	bool active_low = false;
+	int offset, optc, opti, value, previous_value, wanted_pulses;
+	int pulse_count = 0;
+	bool active_low = false, count_pulses = false;
 	char *device, *end;
 	struct timeval tv1, tv2;
 
@@ -46,6 +50,14 @@ int main(int argc, char **argv) {
 			return EXIT_SUCCESS;
 		case 'l':
 			active_low = true;
+			break;
+		case 'p':
+			count_pulses = true;
+			wanted_pulses = strtoul(optarg, &end, 10);
+			if (*end != '\0' || offset > INT_MAX) {
+				printf("invalid pulse count: %s", optarg);
+				exit(1);
+			}
 			break;
 		default:
 			abort();
@@ -84,6 +96,7 @@ int main(int argc, char **argv) {
 			exit(1);
 		}
 		if (value != previous_value) {
+
 	                gettimeofday(&tv2, NULL);
 			printf(
 				"%d\t%0.f\n",
@@ -91,6 +104,15 @@ int main(int argc, char **argv) {
                                 ((double) (tv2.tv_usec - tv1.tv_usec) + (double) (tv2.tv_sec - tv1.tv_sec) * 1000000)
 			);
 			gettimeofday(&tv1, NULL);
+
+			// If the user asked us to limit returned state changes, keep track
+			// and exit when the count is satisfied:
+			if (count_pulses) {
+				pulse_count++;
+				if (pulse_count == wanted_pulses)
+					return EXIT_SUCCESS;
+
+			}
 		}
 		previous_value = value;
 	}
