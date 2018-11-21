@@ -13,9 +13,10 @@ static const struct option longopts[] = {
 	{ "active-low",	no_argument,	NULL,	'l' },
 
 	{ "pulses",	required_argument,	NULL,	'p' },
+	{ "timeout",	required_argument,	NULL,	't' },
 };
 
-static const char *const shortopts = "+hvl";
+static const char *const shortopts = "+hvlpt";
 
 static void print_help(void)
 {
@@ -27,14 +28,17 @@ static void print_help(void)
 	printf("  -v, --version:\tdisplay the version and exit\n");
 	printf("  -l, --active-low:\tset the line active state to low\n");
 	printf("  -p, --pulses:\tnumber of state changes to record before exit\n");
+	printf("  -t, --timeout:\tnumber microseconds to wait before exit\n");
 }
 
 int main(int argc, char **argv) {
-	int offset, optc, opti, value, previous_value, wanted_pulses;
+	int offset, optc, opti, value, previous_value, wanted_pulses,
+	    timeout_microseconds;
+	double start_time;
 	int pulse_count = 0;
-	bool active_low = false, count_pulses = false;
+	bool active_low = false, count_pulses = false, exit_on_timeout = false;
 	char *device, *end;
-	struct timeval tv1, tv2;
+	struct timeval previous_event, current_time;
 
 	for (;;) {
 		optc = getopt_long(argc, argv, shortopts, longopts, &opti);
@@ -59,6 +63,15 @@ int main(int argc, char **argv) {
 				exit(1);
 			}
 			break;
+		case 't':
+			exit_on_timeout = true;
+			timeout_microseconds = strtoul(optarg, &end, 10);
+			if (*end != '\0' || offset > INT_MAX) {
+				printf("invalid timeout: %s", optarg);
+				exit(1);
+			}
+			break;
+
 		default:
 			abort();
 		}
@@ -87,23 +100,29 @@ int main(int argc, char **argv) {
 	// Print initial value:
 	previous_value = gpiod_ctxless_get_value(device, offset, active_low, "libgpiod_pulsein");
 	printf("%d\t0\n", previous_value);
-	gettimeofday(&tv1, NULL);
+	gettimeofday(&previous_event, NULL);
+	start_time = previous_event.tv_usec + (previous_event.tv_sec * 1000000);
 
 	for (;;) {
+		// Get current time, check for timeout:
+		gettimeofday(&current_time, NULL);
+		if (exit_on_timeout) {
+			if ((current_time.tv_usec + (current_time.tv_sec * 1000000) - start_time >= timeout_microseconds))
+					return EXIT_SUCCESS;
+		}
+
 		value = gpiod_ctxless_get_value(device, offset, active_low, "libgpiod_pulsein");
 		if (value < 0) {
 	        	printf("error reading GPIO values");
 			exit(1);
 		}
 		if (value != previous_value) {
-
-	                gettimeofday(&tv2, NULL);
 			printf(
 				"%d\t%0.f\n",
 				value,
-                                ((double) (tv2.tv_usec - tv1.tv_usec) + (double) (tv2.tv_sec - tv1.tv_sec) * 1000000)
+                                ((double) (current_time.tv_usec - previous_event.tv_usec) + (double) (current_time.tv_sec - previous_event.tv_sec) * 1000000)
 			);
-			gettimeofday(&tv1, NULL);
+			gettimeofday(&previous_event, NULL);
 
 			// If the user asked us to limit returned state changes, keep track
 			// and exit when the count is satisfied:
