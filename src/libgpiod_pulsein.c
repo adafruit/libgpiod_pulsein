@@ -7,6 +7,12 @@
 #include <string.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <sched.h>
+#include <signal.h>
+
+
+int pulse_count = 0;
+unsigned int pulses[MAX_PULSES] = {0};
 
 const char *consumername = "libgpiod_pulsein";
 
@@ -19,7 +25,7 @@ static const struct option longopts[] = {
 	{ "timeout",	required_argument,	NULL,	't' },
 };
 
-static const char *const shortopts = "+hvlpt";
+static const char *const shortopts = "+hvlptd";
 
 static void print_help(void)
 {
@@ -35,21 +41,29 @@ static void print_help(void)
 	printf("  -d, --trigger:\tSend an initial output pulse of n microseconds\n");
 }
 
+
+
+
 int main(int argc, char **argv) {
 	int offset, optc, opti, 
 	  value, previous_value, 
-	  wanted_pulses;
-	int32_t timeout_microseconds, trigger_len_us;
-	int pulse_count = 0;
+	  wanted_pulses = 0;
+	int32_t timeout_microseconds = 0, trigger_len_us = 0;
 	bool active_low = false, 
 	  count_pulses = false, 
 	  exit_on_timeout = false,
-	  trigger_pulse = false;
+	  trigger_pulse = false,
+	  fast_linux = false;
 	char *device, *end;
 	struct gpiod_chip *chip = NULL;
 	struct gpiod_line *line;
+#if defined(FOLLOW_PULSE)
+	struct gpiod_line *line2;
+#endif
 	struct timeval time_event;
 	double previous_time, current_time;
+	long int previous_tick, current_tick;
+	float us_per_tick = 0;
 
 	for (;;) {
 		optc = getopt_long(argc, argv, shortopts, longopts, &opti);
@@ -118,6 +132,16 @@ int main(int argc, char **argv) {
 		exit(1);
 	}
 
+	if (signal(SIGINT, sig_handler) == SIG_ERR) {
+	  printf("Can't catch SIGINT\n");
+	  exit(1);
+	}
+
+
+	// Bump up process priority and change scheduler to try to try to make process more 'real time'.
+	set_max_priority();
+
+
 	chip = gpiod_chip_open_by_name(device);
 	if (!chip) {
 	  printf("Unable to open chip: %s\n", device);
@@ -128,11 +152,54 @@ int main(int argc, char **argv) {
 	  printf("Unable to open line: %d\n", offset);
 	  exit(1);
 	}
-	// Be kind, rewind!
-	gpiod_line_release(line);
+
+	if (!fast_linux && us_per_tick == 0) {
+	  // self calibrate best we can
+	  //printf("Calculating us per tick\n");
+
+	  if (gpiod_line_request_input(line, consumername) != 0) {
+	    printf("Unable to set line %d to input\n", offset);
+	    exit(1);
+	  }
+
+	  gettimeofday(&time_event, NULL);
+	  previous_time = time_event.tv_sec;
+	  previous_time *= 1000000;
+	  previous_time += time_event.tv_usec;
+
+	  for (int i=0; i<100; i++) {
+	    int ret = gpiod_line_get_value(line);
+	    if (ret == -1) {
+	      printf("Unable to read line %d\n", offset);
+	      exit(1);
+	    }
+	  }
+	  gettimeofday(&time_event, NULL);
+	  current_time = time_event.tv_sec;
+	  current_time *= 1000000;
+	  current_time += time_event.tv_usec;
+	  us_per_tick = (current_time - previous_time) / 100;
+	  //printf("us_per_tick: %f\n", us_per_tick);
+	  // Be kind, rewind!
+	  gpiod_line_release(line);
+	}
+
+#if defined(FOLLOW_PULSE)
+	// Helpful for debugging where we do our reads on a scope
+	line2 = gpiod_chip_get_line(chip, FOLLOW_PULSE);
+	if (!line2) {
+	  printf("Unable to open line: %d\n", FOLLOW_PULSE);
+	  exit(1);
+	}
+	gpiod_line_release(line2);
+	if (gpiod_line_request_output(line2, consumername, 0) != 0) {
+	    printf("Unable to set line %d to output\n", FOLLOW_PULSE);
+	    exit(1);
+	}
+#endif
 
 	if (trigger_pulse) {
-	  printf("Triggering output for %d microseconds\n", trigger_len_us);
+	  //printf("Triggering output for %d microseconds\n", trigger_len_us);
 	  // set to an output
 	  if (gpiod_line_request_output(line, consumername, active_low) != 0) {
 	    printf("Unable to set line %d to output\n", offset);
@@ -147,7 +214,7 @@ int main(int argc, char **argv) {
 	  usleep(trigger_len_us);
 	  // set 'low'
 	  if (gpiod_line_set_value(line, active_low) != 0) {
-	    printf("Unable to set line %d to unactive level\n", offset);
+	    printf("Unable to set line %d to active level\n", offset);
 	    exit(1);
 	  }
 
@@ -155,23 +222,28 @@ int main(int argc, char **argv) {
 	  gpiod_line_release(line);
 	}
 
+
 	// set to an input
 	if (gpiod_line_request_input(line, consumername) != 0) {
 	  printf("Unable to set line %d to input\n", offset);
 	  exit(1);
-	}	
+	}
 
-	// Print initial value:
+	if ( fast_linux) {
+	  gettimeofday(&time_event, NULL);
+	  previous_time = time_event.tv_sec;
+	  previous_time *= 1000000;
+	  previous_time += time_event.tv_usec;
+	} else {
+	  previous_tick = current_tick = 0;
+	}
+
+
 	previous_value = gpiod_line_get_value(line);
 	if (previous_value == -1) {
 	  printf("Unable to read line %d\n", offset);
 	  exit(1);
 	}
-	printf("%d\t0\n", previous_value);
-	gettimeofday(&time_event, NULL);
-	previous_time = time_event.tv_sec;
-	previous_time *= 1000000;
-	previous_time += time_event.tv_usec;
 
 	for (;;) {
 	  value = gpiod_line_get_value(line);
@@ -180,34 +252,86 @@ int main(int argc, char **argv) {
 	    exit(1);
 	  }
 
-	  if (value != previous_value) {
+	  if (! fast_linux) {
+	    current_tick++;
+	  }
+
+	  double delta = 0;
+	  if ( fast_linux) {
 	    // Get current time
 	    gettimeofday(&time_event, NULL);
 	    current_time = time_event.tv_sec;
 	    current_time *= 1000000;
 	    current_time += time_event.tv_usec;
+	    delta = current_time - previous_time;
+	  } else {
+	    delta = (current_tick - previous_tick) * us_per_tick;
+	  }
 
-	    // check for timeout:
-	    if (exit_on_timeout) {
-	      if (current_time - previous_time >= timeout_microseconds)
-		return EXIT_SUCCESS;
+	  // check for timeout:
+	  if (exit_on_timeout) {
+	    if (delta >= timeout_microseconds) {
+	      print_pulses();
+	      return EXIT_SUCCESS;
 	    }
-	    printf(
-		   "%d\t%0.f\n",
-		   value, current_time - previous_time);
-	    
+	  }
+
+#if defined(FOLLOW_PULSE)
+	  if (gpiod_line_set_value(line2, value) != 0) {
+	    printf("Unable to set line %d to active level\n", FOLLOW_PULSE);
+	    exit(1);
+	    }
+#endif
+	  if (value != previous_value) {
+	    pulses[pulse_count] = delta;
+	    pulse_count++;
+	    //printf("%d\t%0.f\n", value, delta);
+	      
 	    // If the user asked us to limit returned state changes, keep track
 	    // and exit when the count is satisfied:
 	    if (count_pulses) {
-	      pulse_count++;
-	      if (pulse_count == wanted_pulses)
+	      if (pulse_count == wanted_pulses) {
+		printf("pulsed out\n");
+		print_pulses();
 		return EXIT_SUCCESS;
-	      
+	      }
+	    }
+	    previous_value = value;
+	    if ( fast_linux) {
+	      previous_time = current_time;
+	    } else {
+	      previous_tick = current_tick;
 	    }
 	  }
-	  previous_value = value;
-	  previous_time = current_time;
 	}
 
+	print_pulses();
 	return EXIT_SUCCESS;
+}
+
+
+void sig_handler(int signo)
+{
+  if (signo == SIGINT) {
+    printf("received SIGINT\n");
+  }
+  print_pulses();
+  exit(0);
+}
+
+void print_pulses(void) {
+  printf("%d PULSES\n", pulse_count);
+  for (int i=0; i<pulse_count; i++) {
+    printf("%d, ", pulses[i]);
+  }
+  printf("\n");
+}
+
+
+void set_max_priority(void) {
+  struct sched_param sched;
+  memset(&sched, 0, sizeof(sched));
+  // Use FIFO scheduler with highest priority for the lowest chance of the kernel context switching.
+  sched.sched_priority = sched_get_priority_max(SCHED_FIFO);
+  sched_setscheduler(0, SCHED_FIFO, &sched);
 }
