@@ -320,9 +320,12 @@ void sig_handler(int signo)
 }
 
 void print_pulses(void) {
-  printf("%d PULSES\n", pulse_count);
+  //printf("%d PULSES\n", pulse_count);
   for (int i=0; i<pulse_count; i++) {
-    printf("%d, ", pulses[i]);
+    printf("%d", pulses[i]);
+    if (i != pulse_count-1) {
+      printf(", ");
+    }
   }
   printf("\n");
 }
