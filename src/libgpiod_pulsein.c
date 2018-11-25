@@ -32,6 +32,7 @@ static const struct option longopts[] = {
 	{ "pulses",	required_argument,	NULL,	'p' },
 	{ "timeout",	required_argument,	NULL,	't' },
 	{ "queue",      required_argument,      NULL,   'q' },
+	{ "slow",       no_argument,    NULL,   's' },
 };
 
 static const char *const shortopts = "+hviptd";
@@ -49,6 +50,7 @@ static void print_help(void)
 	printf("  -t, --timeout:\tnumber microseconds to wait before exit\n");
 	printf("  -d, --trigger:\tSend an initial output pulse of n microseconds\n");
 	printf("  -q, --queue:\tID number of SYSV queue for IPC\n");
+	printf("  -s, --slow:\tWe're running on a slow linux machine,\ntry to calibrate us-per-tick - values may not be true us");
 }
 
 
@@ -62,7 +64,7 @@ int main(int argc, char **argv) {
 	bool idle_state = false,
 	  exit_on_timeout = false,
 	  trigger_pulse = false,
-	  fast_linux = false;
+	  fast_linux = true;
 	char *device, *end;
 	struct gpiod_chip *chip = NULL;
 	struct gpiod_line *line;
@@ -91,6 +93,9 @@ int main(int argc, char **argv) {
 		case 'i':
 			idle_state = true;
 			break;
+		case 's':
+		  fast_linux = false;
+                  break;
 		case 'p':
 			max_pulses = strtoul(optarg, &end, 10);
 			if (*end != '\0' || offset > INT_MAX) {
