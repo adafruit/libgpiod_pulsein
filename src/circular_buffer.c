@@ -144,6 +144,26 @@ int circular_buf_get(cbuf_handle_t cbuf, storage_t* data)
     return r;
 }
 
+int circular_buf_peek(cbuf_handle_t cbuf, int index, storage_t* data)
+{
+    assert(cbuf && data && cbuf->buffer);
+
+    int r = -1;
+
+    if(!circular_buf_empty(cbuf))
+    {
+      if ((index < 0) || (index >= cbuf->max)) {
+	return -1;
+      }
+      size_t peekptr = (cbuf->tail + index) % cbuf->max;
+      *data = cbuf->buffer[peekptr];
+
+      r = 0;
+    }
+
+    return r;
+}
+
 bool circular_buf_empty(cbuf_handle_t cbuf)
 {
 	assert(cbuf);

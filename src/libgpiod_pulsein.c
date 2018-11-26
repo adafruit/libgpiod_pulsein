@@ -241,7 +241,9 @@ int main(int argc, char **argv) {
 	    int msglen = msgrcv(queue_id, (struct msgbuf *)&vmbuf, 
 				VMSG_MAXSIZE, 1, IPC_NOWAIT);
 	    if ((msglen != -1) && (msglen >= 1)) {
-	      vmbuf.message[msglen] = 0;
+	      vmbuf.message[msglen] = 0; // null terminate message to keep neat
+	      bool was_paused = paused;
+
 	      //printf("got %d byte message: %s\n", msglen, vmbuf.message);
 	      char cmd = vmbuf.message[0];
 	      if (cmd == 'p') {
@@ -274,8 +276,40 @@ int main(int argc, char **argv) {
 		snprintf(vmbuf.message, 15, "%d", pulse);
 		vmbuf.msg_type = 2;
 		msgsnd(queue_id, (struct msgbuf *)&vmbuf, strlen(vmbuf.message), 0);
+	      } else if (cmd == 'i') {
+		// query one element by index #
+		int index = strtol(vmbuf.message+1, NULL, 10);
+		int buf_len = circular_buf_size(ringbuffer);
+		unsigned int pulse = 0;
+		if ((index >= buf_len) || (index <= -buf_len)) {
+		  pulse = -1; // invalid, we're seeking beyond the buffer
+		} else {
+		  if (index < 0) { // back indexing from end
+		    index = buf_len + index;
+		  }
+		  // peek in the queue!
+		  if (circular_buf_peek(ringbuffer, index, &pulse) == -1) {
+		    pulse = -1;
+		  }
+		}
+		// OK reply back!
+		snprintf(vmbuf.message, 15, "%d", pulse);
+		vmbuf.msg_type = 2;
+		msgsnd(queue_id, (struct msgbuf *)&vmbuf, strlen(vmbuf.message), 0);
 	      }
-	    } 
+	      if (was_paused && !paused) {
+		// reset the timestamp when unpaused
+		if ( fast_linux) {
+		  gettimeofday(&time_event, NULL);
+		  previous_time = time_event.tv_sec;
+		  previous_time *= 1000000;
+		  previous_time += time_event.tv_usec;
+		} else {
+		  previous_tick = current_tick = 0;
+		}
+		previous_value = idle_state;
+	      }
+	    }
 	  }
 	  if (paused) {
 	    continue;
