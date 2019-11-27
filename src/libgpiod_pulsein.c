@@ -64,7 +64,8 @@
 	 bool idle_state = false,
 	   exit_on_timeout = false,
 	   trigger_pulse = false,
-	   fast_linux = true;
+	   fast_linux = true,
+	   waiting_for_first_change = true;
 	 char *device, *end;
 	 struct gpiod_chip *chip = NULL;
 	 struct gpiod_line *line;
@@ -72,7 +73,7 @@
 	 struct gpiod_line *line2;
  #endif
 	 struct timeval time_event;
-	 double previous_time, current_time;
+	 double previous_time = 0, current_time;
 	 long int previous_tick, current_tick;
 	 float us_per_tick = 0;
 	 struct vmsgbuf vmbuf;
@@ -308,6 +309,7 @@
 		   previous_tick = current_tick = 0;
 		 }
 		 previous_value = idle_state;
+		 waiting_for_first_change = true;
 	       }
 	     }
 	   }
@@ -351,7 +353,12 @@
 	     }
  #endif
 	   if (value != previous_value) {
-	     circular_buf_put(ringbuffer, delta);
+	     if (waiting_for_first_change && (value != idle_state)) {
+	       // we *dont* save the first transition from idle value
+	       waiting_for_first_change = false;
+	     } else {
+	       circular_buf_put(ringbuffer, delta);
+	     }
 
 	     previous_value = value;
 	     if ( fast_linux) {
