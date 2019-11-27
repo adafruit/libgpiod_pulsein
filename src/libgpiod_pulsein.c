@@ -418,19 +418,19 @@
    //printf("Triggering output for %d microseconds\n", trigger_len_us);
    gpiod_line_release(line);
    // set to an output
-   if (gpiod_line_request_output(line, consumername, !idle_state) != 0) {
+   if (gpiod_line_request_output(line, consumername, idle_state) != 0) {
      printf("Unable to set line to output\n");
      exit(1);
    }
-   // set 'high'
-   if (gpiod_line_set_value(line, idle_state) != 0) {
+   // set 'active'
+   if (gpiod_line_set_value(line, !idle_state) != 0) {
      printf("Unable to set line for trigger pulse\n");
      exit(1);
    }
    // wait
    usleep(trigger_len_us);
-   // set 'low'
-   if (gpiod_line_set_value(line, !idle_state) != 0) {
+   // set back to idle
+   if (gpiod_line_set_value(line, idle_state) != 0) {
      printf("Unable to set line for trigger pulse\n");
      exit(1);
    }
