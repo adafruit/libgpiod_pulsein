@@ -24,6 +24,7 @@
 #include "circular_buffer.h"
 #include <getopt.h>
 #include <limits.h>
+#include <pthread.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
@@ -40,8 +41,26 @@ struct vmsgbuf {
 };
 
 unsigned int pulses[MAX_PULSE_BUFFER] = {0};
+
+// Accessed by multiple threads with explicit synchronization
 cbuf_handle_t ringbuffer;
-volatile bool paused = false;
+pthread_mutex_t ringbuffer_mtx;
+struct gpiod_line *line;
+pthread_mutex_t line_mtx;
+volatile bool was_paused = false;
+pthread_mutex_t barrier;
+
+#if defined(FOLLOW_PULSE)
+struct gpiod_line *line2;
+#endif
+
+int offset;
+float us_per_tick = 0;
+int32_t timeout_microseconds = 0;
+
+// Accessed by multiple threads, accesses should be atomic
+volatile bool idle_state = false, paused = false,
+              fast_linux = true, exit_on_timeout = false;
 
 const char *consumername = "libgpiod_pulsein";
 
@@ -76,23 +95,15 @@ static void print_help(void) {
 }
 
 int main(int argc, char **argv) {
-  int offset, optc, opti, value, previous_value;
+  int optc, opti;
   int max_pulses = MAX_PULSE_BUFFER;
-  int32_t timeout_microseconds = 0, trigger_len_us = 0;
-  bool idle_state = false, exit_on_timeout = false, trigger_pulse = false,
-       fast_linux = true, waiting_for_first_change = true;
+  int32_t trigger_len_us = 0;
+  bool trigger_pulse = false;
   char *device, *end;
   struct gpiod_chip *chip = NULL;
-  struct gpiod_line *line;
-#if defined(FOLLOW_PULSE)
-  struct gpiod_line *line2;
-#endif
-  struct timeval time_event;
-  double previous_time = 0, current_time;
-  long int previous_tick, current_tick;
-  float us_per_tick = 0;
   struct vmsgbuf vmbuf;
   int queue_id = 0, queue_key = 0;
+  pthread_t polling_thread;
 
   for (;;) {
     optc = getopt_long(argc, argv, shortopts, longopts, &opti);
@@ -235,58 +246,67 @@ int main(int argc, char **argv) {
     pulse_output(line, idle_state, trigger_len_us);
   }
 
-  if (fast_linux) {
-    gettimeofday(&time_event, NULL);
-    previous_time = time_event.tv_sec;
-    previous_time *= 1000000;
-    previous_time += time_event.tv_usec;
-  } else {
-    previous_tick = current_tick = 0;
-  }
-
   // a simple ring buffer
   ringbuffer = circular_buf_init(pulses, max_pulses);
   circular_buf_reset(ringbuffer);
 
-  // We record the first change from the idle_state
-  previous_value = idle_state;
+  // Spawn thread for sensor polling
+  pthread_create(&polling_thread, NULL, polling_thread_runner, NULL);
 
   for (;;) {
     if (queue_key != 0) {
       vmbuf.msg_type = 1;
-      int msglen = msgrcv(queue_id, (struct msgbuf *)&vmbuf, VMSG_MAXSIZE - 1,
-                          1, IPC_NOWAIT);
+      int msglen =
+          msgrcv(queue_id, (struct msgbuf *)&vmbuf, VMSG_MAXSIZE - 1, 1, 0);
       if ((msglen != -1) && (msglen >= 1)) {
         vmbuf.message[msglen] = 0; // null terminate message to keep neat
-        bool was_paused = paused;
 
         // printf("got %d byte message: %s\n", msglen, vmbuf.message);
         char cmd = vmbuf.message[0];
         if (cmd == 'p') {
           // pause
-          paused = true;
+          if (!paused) {
+            pthread_mutex_lock(&barrier);
+            paused = true;
+            was_paused = true;
+          }
         } else if (cmd == 'r') {
           // resume
-          paused = false;
+          if (paused) {
+            paused = false;
+            pthread_mutex_unlock(&barrier);
+          }
         } else if (cmd == 'c') {
           // clear
+          pthread_mutex_lock(&ringbuffer_mtx);
           circular_buf_reset(ringbuffer);
+          pthread_mutex_unlock(&ringbuffer_mtx);
         } else if (cmd == 'l') {
           // send back length
+          pthread_mutex_lock(&ringbuffer_mtx);
           int buflen = circular_buf_size(ringbuffer);
+          pthread_mutex_unlock(&ringbuffer_mtx);
           snprintf(vmbuf.message, 15, "%d", buflen);
           vmbuf.msg_type = 2;
           msgsnd(queue_id, (struct msgbuf *)&vmbuf, strlen(vmbuf.message), 0);
         } else if (cmd == 't') {
           // Resume with trigger pulse!
-          unsigned int trigger_len = strtoul(vmbuf.message + 1, NULL, 10);
-          // printf("trigger %d\n", trigger_len);
-          pulse_output(line, idle_state, trigger_len);
-          paused = false;
+          if (paused) {
+            unsigned int trigger_len = strtoul(vmbuf.message + 1, NULL, 10);
+            // printf("trigger %d\n", trigger_len);
+            pthread_mutex_lock(&line_mtx);
+            pulse_output(line, idle_state, trigger_len);
+            pthread_mutex_unlock(&line_mtx);
+            paused = false;
+            pthread_mutex_unlock(&barrier);
+          }
         } else if (cmd == '^') {
           // pop one message off and send it
           unsigned int pulse;
-          if (circular_buf_get(ringbuffer, &pulse) == -1) {
+          pthread_mutex_lock(&ringbuffer_mtx);
+          int ret = circular_buf_get(ringbuffer, &pulse);
+          pthread_mutex_unlock(&ringbuffer_mtx);
+          if (ret == -1) {
             pulse = -1;
           }
           snprintf(vmbuf.message, 15, "%d", pulse);
@@ -295,7 +315,9 @@ int main(int argc, char **argv) {
         } else if (cmd == 'i') {
           // query one element by index #
           int index = strtol(vmbuf.message + 1, NULL, 10);
+          pthread_mutex_lock(&ringbuffer_mtx);
           int buf_len = circular_buf_size(ringbuffer);
+          pthread_mutex_unlock(&ringbuffer_mtx);
           unsigned int pulse = 0;
           if ((index >= buf_len) || (index <= -buf_len)) {
             pulse = -1; // invalid, we're seeking beyond the buffer
@@ -304,7 +326,10 @@ int main(int argc, char **argv) {
               index = buf_len + index;
             }
             // peek in the queue!
-            if (circular_buf_peek(ringbuffer, index, &pulse) == -1) {
+            pthread_mutex_lock(&ringbuffer_mtx);
+            int ret = circular_buf_peek(ringbuffer, index, &pulse);
+            pthread_mutex_unlock(&ringbuffer_mtx);
+            if (ret == -1) {
               pulse = -1;
             }
           }
@@ -313,73 +338,6 @@ int main(int argc, char **argv) {
           vmbuf.msg_type = 2;
           msgsnd(queue_id, (struct msgbuf *)&vmbuf, strlen(vmbuf.message), 0);
         }
-        if (was_paused && !paused) {
-          // reset the timestamp when unpaused
-          if (fast_linux) {
-            gettimeofday(&time_event, NULL);
-            previous_time = time_event.tv_sec;
-            previous_time *= 1000000;
-            previous_time += time_event.tv_usec;
-          } else {
-            previous_tick = current_tick = 0;
-          }
-          previous_value = idle_state;
-          waiting_for_first_change = true;
-        }
-      }
-    }
-    if (paused) {
-      continue;
-    }
-    value = gpiod_line_get_value(line);
-    if (value < 0) {
-      printf("Unable to read line %d\n", offset);
-      exit(1);
-    }
-
-    if (!fast_linux) {
-      current_tick++;
-    }
-
-    double delta = 0;
-    if (fast_linux) {
-      // Get current time
-      gettimeofday(&time_event, NULL);
-      current_time = time_event.tv_sec;
-      current_time *= 1000000;
-      current_time += time_event.tv_usec;
-      delta = current_time - previous_time;
-    } else {
-      delta = (current_tick - previous_tick) * us_per_tick;
-    }
-
-    // check for timeout:
-    if (exit_on_timeout) {
-      if (delta >= timeout_microseconds) {
-        print_pulses();
-        return EXIT_SUCCESS;
-      }
-    }
-
-#if defined(FOLLOW_PULSE)
-    if (gpiod_line_set_value(line2, value) != 0) {
-      printf("Unable to set line %d to active level\n", FOLLOW_PULSE);
-      exit(1);
-    }
-#endif
-    if (value != previous_value) {
-      if (waiting_for_first_change && (value != idle_state)) {
-        // we *dont* save the first transition from idle value
-        waiting_for_first_change = false;
-      } else {
-        circular_buf_put(ringbuffer, delta);
-      }
-
-      previous_value = value;
-      if (fast_linux) {
-        previous_time = current_time;
-      } else {
-        previous_tick = current_tick;
       }
     }
   }
@@ -395,16 +353,24 @@ void sig_handler(int signo) {
     exit(0);
   }
   if (signo == SIGTSTP) {
-    fprintf(stderr, "pausing\n");
-    paused = true;
+    if (!paused) {
+      pthread_mutex_lock(&barrier);
+      fprintf(stderr, "pausing\n");
+      paused = true;
+      was_paused = true;
+    }
   }
   if (signo == SIGCONT) {
-    fprintf(stderr, "un-pausing\n");
-    paused = false;
+    if (paused) {
+      fprintf(stderr, "un-pausing\n");
+      paused = false;
+      pthread_mutex_unlock(&barrier);
+    }
   }
 }
 
 void print_pulses(void) {
+  pthread_mutex_lock(&ringbuffer_mtx);
   int pulse_count = circular_buf_size(ringbuffer);
   for (int i = 0; i < pulse_count; i++) {
     unsigned int pulse = 0;
@@ -415,6 +381,7 @@ void print_pulses(void) {
       printf(", ");
     }
   }
+  pthread_mutex_unlock(&ringbuffer_mtx);
   printf("\n");
 }
 
@@ -427,6 +394,7 @@ void set_max_priority(void) {
   sched_setscheduler(0, SCHED_FIFO, &sched);
 }
 
+// not thread-safe, expects exclusive access to line
 void pulse_output(struct gpiod_line *line, bool idle_state,
                   int trigger_len_us) {
   // printf("Triggering output for %d microseconds\n", trigger_len_us);
@@ -459,6 +427,7 @@ void pulse_output(struct gpiod_line *line, bool idle_state,
   }
 }
 
+// not thread-safe, expects exclusive access to line
 float calculate_us_per_tick(struct gpiod_line *line) {
   struct timeval time_event;
   double previous_time, current_time;
@@ -491,4 +460,104 @@ float calculate_us_per_tick(struct gpiod_line *line) {
   // Be kind, rewind!
   gpiod_line_release(line);
   return us_per_tick;
+}
+
+void *polling_thread_runner(void *args) {
+  int value, previous_value;
+  struct timeval time_event;
+  double previous_time = 0, current_time;
+  long int previous_tick, current_tick;
+  bool waiting_for_first_change = true;
+
+  if (fast_linux) {
+    gettimeofday(&time_event, NULL);
+    previous_time = time_event.tv_sec;
+    previous_time *= 1000000;
+    previous_time += time_event.tv_usec;
+  } else {
+    previous_tick = current_tick = 0;
+  }
+
+  // We record the first change from the idle_state
+  previous_value = idle_state;
+
+  for (;;) {
+    // halt execution if paused
+    pthread_mutex_lock(&barrier);
+
+    if (was_paused) {
+      // reset the timestamp when unpaused
+      if (fast_linux) {
+        gettimeofday(&time_event, NULL);
+        previous_time = time_event.tv_sec;
+        previous_time *= 1000000;
+        previous_time += time_event.tv_usec;
+      } else {
+        previous_tick = current_tick = 0;
+      }
+      previous_value = idle_state;
+      waiting_for_first_change = true;
+      was_paused = false;
+    }
+
+    pthread_mutex_unlock(&barrier);
+
+    pthread_mutex_lock(&line_mtx);
+    value = gpiod_line_get_value(line);
+    pthread_mutex_unlock(&line_mtx);
+    if (value < 0) {
+      printf("Unable to read line %d\n", offset);
+      exit(1);
+    }
+
+    if (!fast_linux) {
+      current_tick++;
+    }
+
+    double delta = 0;
+    if (fast_linux) {
+      // Get current time
+      gettimeofday(&time_event, NULL);
+      current_time = time_event.tv_sec;
+      current_time *= 1000000;
+      current_time += time_event.tv_usec;
+      delta = current_time - previous_time;
+    } else {
+      delta = (current_tick - previous_tick) * us_per_tick;
+    }
+
+    // check for timeout:
+    if (exit_on_timeout) {
+      if (delta >= timeout_microseconds) {
+        print_pulses();
+        exit(EXIT_SUCCESS);
+      }
+    }
+
+#if defined(FOLLOW_PULSE)
+    if (gpiod_line_set_value(line2, value) != 0) {
+      printf("Unable to set line %d to active level\n", FOLLOW_PULSE);
+      exit(1);
+    }
+#endif
+    if (value != previous_value) {
+      if (waiting_for_first_change && (value != idle_state)) {
+        // we *dont* save the first transition from idle value
+        waiting_for_first_change = false;
+      } else {
+        pthread_mutex_lock(&ringbuffer_mtx);
+        circular_buf_put(ringbuffer, delta);
+        pthread_mutex_unlock(&ringbuffer_mtx);
+      }
+
+      previous_value = value;
+      if (fast_linux) {
+        previous_time = current_time;
+      } else {
+        previous_tick = current_tick;
+      }
+    }
+  }
+
+  return NULL;
 }
