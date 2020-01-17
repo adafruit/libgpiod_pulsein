@@ -254,8 +254,8 @@ int main(int argc, char **argv) {
   for (;;) {
     if (queue_key != 0) {
       vmbuf.msg_type = 1;
-      int msglen = msgrcv(queue_id, (struct msgbuf *)&vmbuf, VMSG_MAXSIZE, 1,
-                          IPC_NOWAIT);
+      int msglen = msgrcv(queue_id, (struct msgbuf *)&vmbuf, VMSG_MAXSIZE - 1,
+                          1, IPC_NOWAIT);
       if ((msglen != -1) && (msglen >= 1)) {
         vmbuf.message[msglen] = 0; // null terminate message to keep neat
         bool was_paused = paused;
