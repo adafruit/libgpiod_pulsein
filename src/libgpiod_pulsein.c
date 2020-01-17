@@ -114,7 +114,7 @@ int main(int argc, char **argv) {
       break;
     case 'p':
       max_pulses = strtoul(optarg, &end, 10);
-      if (*end != '\0' || offset > INT_MAX) {
+      if (*end != '\0' || max_pulses > INT_MAX) {
         printf("invalid max pulse count: %s", optarg);
         exit(1);
       }
@@ -122,7 +122,7 @@ int main(int argc, char **argv) {
     case 'd':
       trigger_pulse = true;
       trigger_len_us = strtoul(optarg, &end, 10);
-      if (*end != '\0' || offset > INT_MAX) {
+      if (*end != '\0' || trigger_len_us > INT_MAX) {
         printf("invalid trigger length: %s", optarg);
         exit(1);
       }
@@ -130,14 +130,14 @@ int main(int argc, char **argv) {
     case 't':
       exit_on_timeout = true;
       timeout_microseconds = strtoul(optarg, &end, 10);
-      if (*end != '\0' || offset > INT_MAX) {
+      if (*end != '\0' || timeout_microseconds > INT_MAX) {
         printf("invalid timeout: %s", optarg);
         exit(1);
       }
       break;
     case 'q':
       queue_key = strtoul(optarg, &end, 10);
-      if (*end != '\0' || offset > INT_MAX) {
+      if (*end != '\0' || queue_key > INT_MAX) {
         printf("invalid queue key: %s", optarg);
         exit(1);
       }
