@@ -23,11 +23,11 @@
 #include "libgpiod_pulsein.h"
 #include "circular_buffer.h"
 #include <getopt.h>
-#include <gpiod.h>
 #include <limits.h>
 #include <sched.h>
 #include <signal.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/msg.h>
 #include <sys/time.h>

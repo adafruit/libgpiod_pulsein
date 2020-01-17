@@ -1,3 +1,5 @@
+#include <gpiod.h>
+#include <stdbool.h>
 
 //#define FOLLOW_PULSE  19
 #define MAX_PULSE_BUFFER 1000
