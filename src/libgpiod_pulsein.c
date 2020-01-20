@@ -9,8 +9,8 @@
 // copies of the Software, and to permit persons to whom the Software is
 // furnished to do so, subject to the following conditions:
 //
-// The above copyright notice and this permission notice shall be included in all
-// copies or substantial portions of the Software.
+// The above copyright notice and this permission notice shall be included in
+// all copies or substantial portions of the Software.
 //
 // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
 // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
@@ -59,8 +59,8 @@ float us_per_tick = 0;
 int32_t timeout_microseconds = 0;
 
 // Accessed by multiple threads, accesses should be atomic
-volatile bool idle_state = false, paused = false,
-              fast_linux = true, exit_on_timeout = false;
+volatile bool idle_state = false, paused = false, fast_linux = true,
+              exit_on_timeout = false;
 
 const char *consumername = "libgpiod_pulsein";
 
@@ -292,13 +292,24 @@ int main(int argc, char **argv) {
         } else if (cmd == 't') {
           // Resume with trigger pulse!
           if (paused) {
-            unsigned int trigger_len = strtoul(vmbuf.message + 1, NULL, 10);
-            // printf("trigger %d\n", trigger_len);
-            pthread_mutex_lock(&line_mtx);
-            pulse_output(line, idle_state, trigger_len);
-            pthread_mutex_unlock(&line_mtx);
             paused = false;
             pthread_mutex_unlock(&barrier);
+            unsigned int trigger_len = strtoul(vmbuf.message + 1, NULL, 10);
+            // printf("trigger %d\n", trigger_len);
+            busy_wait_milliseconds(80);
+            while (pthread_mutex_trylock(&line_mtx) != 0)
+              ;
+            pulse_output(line, idle_state, trigger_len);
+            pthread_mutex_unlock(&line_mtx);
+
+            // debug
+            // FILE *fptr = fopen(
+            //     "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
+            //     "r");
+            // char c[1000];
+            // fgets(c, 1000, fptr);
+            // fclose(fptr);
+            // printf("%s", c);
           }
         } else if (cmd == '^') {
           // pop one message off and send it
@@ -410,7 +421,7 @@ void pulse_output(struct gpiod_line *line, bool idle_state,
     exit(1);
   }
   // wait
-  usleep(trigger_len_us);
+  busy_wait_milliseconds(trigger_len_us / 1000);
   // set back to idle
   if (gpiod_line_set_value(line, idle_state) != 0) {
     printf("Unable to set line for trigger pulse\n");
@@ -502,7 +513,8 @@ void *polling_thread_runner(void *args) {
 
     pthread_mutex_unlock(&barrier);
 
-    pthread_mutex_lock(&line_mtx);
+    while (pthread_mutex_trylock(&line_mtx) != 0)
+      ;
     value = gpiod_line_get_value(line);
     pthread_mutex_unlock(&line_mtx);
     if (value < 0) {
@@ -545,7 +557,8 @@ void *polling_thread_runner(void *args) {
         // we *dont* save the first transition from idle value
         waiting_for_first_change = false;
       } else {
-        pthread_mutex_lock(&ringbuffer_mtx);
+        while (pthread_mutex_trylock(&ringbuffer_mtx) != 0)
+          ;
         circular_buf_put(ringbuffer, delta);
         pthread_mutex_unlock(&ringbuffer_mtx);
       }
@@ -560,4 +573,20 @@ void *polling_thread_runner(void *args) {
   }
 
   return NULL;
+}
+
+void busy_wait_milliseconds(int millis) {
+  // Set delay time period.
+  struct timeval deltatime;
+  deltatime.tv_sec = millis / 1000;
+  deltatime.tv_usec = (millis % 1000) * 1000;
+  struct timeval walltime;
+  // Get current time and add delay to find end time.
+  gettimeofday(&walltime, NULL);
+  struct timeval endtime;
+  timeradd(&walltime, &deltatime, &endtime);
+  // Tight loop to waste time (and CPU) until enough time as elapsed.
+  while (timercmp(&walltime, &endtime, <)) {
+    gettimeofday(&walltime, NULL);
+  }
 }
