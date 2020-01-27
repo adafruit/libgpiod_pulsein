@@ -361,8 +361,8 @@ void sig_handler(int signo) {
   }
 }
 
+// not thread-safe, expects exclusive access to ringbuffer
 void print_pulses(void) {
-  pthread_mutex_lock(&ringbuffer_mtx);
   int pulse_count = circular_buf_size(ringbuffer);
   for (int i = 0; i < pulse_count; i++) {
     unsigned int pulse = 0;
@@ -373,7 +373,6 @@ void print_pulses(void) {
       printf(", ");
     }
   }
-  pthread_mutex_unlock(&ringbuffer_mtx);
   printf("\n");
 }
 
@@ -523,7 +522,9 @@ void *polling_thread_runner(void *args) {
     // check for timeout:
     if (exit_on_timeout) {
       if (delta >= timeout_microseconds) {
+        pthread_mutex_lock(&ringbuffer_mtx);
         print_pulses();
+        pthread_mutex_unlock(&ringbuffer_mtx);
         exit(EXIT_SUCCESS);
       }
     }
