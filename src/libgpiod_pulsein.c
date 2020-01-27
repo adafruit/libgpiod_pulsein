@@ -57,10 +57,8 @@ struct gpiod_line *line2;
 int offset;
 float us_per_tick = 0;
 int32_t timeout_microseconds = 0;
-
-// Accessed by multiple threads, accesses should be atomic
-volatile bool idle_state = false, paused = false, fast_linux = true,
-              exit_on_timeout = false;
+bool idle_state = false, fast_linux = true, exit_on_timeout = false,
+     paused = false;
 
 const char *consumername = "libgpiod_pulsein";
 
@@ -91,7 +89,7 @@ static void print_help(void) {
   printf("  -d, --trigger:\tSend an initial output pulse of n microseconds\n");
   printf("  -q, --queue:\tID number of SYSV queue for IPC\n");
   printf("  -s, --slow:\tWe're running on a slow linux machine,\ntry to "
-         "calibrate us-per-tick - values may not be true us");
+         "calibrate us-per-tick - values may not be true us\n");
 }
 
 int main(int argc, char **argv) {
@@ -250,6 +248,11 @@ int main(int argc, char **argv) {
   ringbuffer = circular_buf_init(pulses, max_pulses);
   circular_buf_reset(ringbuffer);
 
+  // initialize mutexes
+  pthread_mutex_init(&ringbuffer_mtx, NULL);
+  pthread_mutex_init(&line_mtx, NULL);
+  pthread_mutex_init(&barrier, NULL);
+
   // Spawn thread for sensor polling
   pthread_create(&polling_thread, NULL, polling_thread_runner, NULL);
 
@@ -296,20 +299,14 @@ int main(int argc, char **argv) {
             pthread_mutex_unlock(&barrier);
             unsigned int trigger_len = strtoul(vmbuf.message + 1, NULL, 10);
             // printf("trigger %d\n", trigger_len);
+
+            // Keep CPU busy for a while to make sure it's not sleeping and
+            // clocked high.
             busy_wait_milliseconds(80);
             while (pthread_mutex_trylock(&line_mtx) != 0)
               ;
             pulse_output(line, idle_state, trigger_len);
             pthread_mutex_unlock(&line_mtx);
-
-            // debug
-            // FILE *fptr = fopen(
-            //     "/sys/devices/system/cpu/cpu0/cpufreq/scaling_cur_freq",
-            //     "r");
-            // char c[1000];
-            // fgets(c, 1000, fptr);
-            // fclose(fptr);
-            // printf("%s", c);
           }
         } else if (cmd == '^') {
           // pop one message off and send it
@@ -353,7 +350,6 @@ int main(int argc, char **argv) {
     }
   }
 
-  print_pulses();
   return EXIT_SUCCESS;
 }
 
@@ -361,22 +357,7 @@ void sig_handler(int signo) {
   if (signo == SIGINT) {
     fprintf(stderr, "received SIGINT\n");
     print_pulses();
-    exit(0);
-  }
-  if (signo == SIGTSTP) {
-    if (!paused) {
-      pthread_mutex_lock(&barrier);
-      fprintf(stderr, "pausing\n");
-      paused = true;
-      was_paused = true;
-    }
-  }
-  if (signo == SIGCONT) {
-    if (paused) {
-      fprintf(stderr, "un-pausing\n");
-      paused = false;
-      pthread_mutex_unlock(&barrier);
-    }
+    exit(EXIT_SUCCESS);
   }
 }
 
@@ -493,7 +474,7 @@ void *polling_thread_runner(void *args) {
   previous_value = idle_state;
 
   for (;;) {
-    // halt execution if paused
+    // block as long as we are paused, keeping the CPU idle
     pthread_mutex_lock(&barrier);
 
     if (was_paused) {
@@ -513,6 +494,7 @@ void *polling_thread_runner(void *args) {
 
     pthread_mutex_unlock(&barrier);
 
+    // spin lock in order to keep the CPU awake and clocked high
     while (pthread_mutex_trylock(&line_mtx) != 0)
       ;
     value = gpiod_line_get_value(line);
@@ -557,6 +539,7 @@ void *polling_thread_runner(void *args) {
         // we *dont* save the first transition from idle value
         waiting_for_first_change = false;
       } else {
+        // spin lock in order to keep the CPU awake and clocked high
         while (pthread_mutex_trylock(&ringbuffer_mtx) != 0)
           ;
         circular_buf_put(ringbuffer, delta);
