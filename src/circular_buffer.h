@@ -1,6 +1,8 @@
 #ifndef CIRCULAR_BUFFER_H_
 #define CIRCULAR_BUFFER_H_
 
+#include <stddef.h>
+
 typedef unsigned int storage_t;
 
 /// Opaque circular buffer structure

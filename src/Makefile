@@ -1,5 +1,5 @@
 CC=gcc
-CFLAGS=-I. -lgpiod -Wall
+CFLAGS=-I. -lgpiod -pthread -Wall
 DEPS=libgpiod_pulsein.h
 OBJ=libgpiod_pulsein.o circular_buffer.o
 
