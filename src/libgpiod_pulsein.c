@@ -22,6 +22,7 @@
 
 #include "libgpiod_pulsein.h"
 #include "circular_buffer.h"
+#include <errno.h>
 #include <getopt.h>
 #include <limits.h>
 #include <pthread.h>
@@ -261,7 +262,15 @@ int main(int argc, char **argv) {
       vmbuf.msg_type = 1;
       int msglen =
           msgrcv(queue_id, (struct msgbuf *)&vmbuf, VMSG_MAXSIZE - 1, 1, 0);
-      if ((msglen != -1) && (msglen >= 1)) {
+      if (msglen == -1) {
+        if (errno == EINVAL) {
+          // queue_id is invalid, i.e., the message queue has been destroyed.
+          // There is no way to recover from this.
+          fprintf(stderr, "Lost access to message queue\n");
+          exit(EXIT_FAILURE);
+        }
+      }
+      if (msglen >= 1) {
         vmbuf.message[msglen] = 0; // null terminate message to keep neat
 
         // printf("got %d byte message: %s\n", msglen, vmbuf.message);
